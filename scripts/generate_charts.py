@@ -24,22 +24,6 @@ if not os.path.exists(RESULTS_FILE):
 with open(RESULTS_FILE, "r") as f:
     content = f.read()
 
-# Parse markdown table rows
-# Format typically: | model | size | params | backend | threads | ... | test | t/s |
-rows = []
-for line in content.splitlines():
-    line = line.strip()
-    if line.startswith("|") and not line.startswith("| model") and not line.startswith("|---"):
-        parts = [p.strip() for p in line.split("|")[1:-1]]
-        if len(parts) >= 6:
-            rows.append(parts)
-
-if not rows:
-    print("[!] No benchmark table rows found in results file.")
-    sys.exit(1)
-
-print(f"[+] Successfully parsed {len(rows)} empirical benchmark measurements.")
-
 # Dark theme palette
 BG_COLOR = "#0d1117"
 PANEL_COLOR = "#161b22"
@@ -47,6 +31,8 @@ TEXT_COLOR = "#c9d1d9"
 GRID_COLOR = "#30363d"
 ACCENT_CYAN = "#58a6ff"
 ACCENT_GREEN = "#3fb950"
+ACCENT_ORANGE = "#d29922"
+ACCENT_PURPLE = "#bc8cff"
 
 plt.rcParams.update({
     "figure.facecolor": BG_COLOR,
@@ -61,51 +47,159 @@ plt.rcParams.update({
     "font.size": 11,
 })
 
-# Filter thread scaling results
-threads = []
-tg_vals = []
-pp_vals = []
+# Split by sections
+sections = content.split("### ")
+print(f"[+] Found {len(sections)-1} benchmark sections.")
 
-for r in rows:
-    # Check if thread row
-    # Identify test type from columns
-    test_type = None
-    ts_val = None
-    thread_num = None
+for section in sections[1:]:
+    lines = section.strip().splitlines()
+    sec_title = lines[0].strip()
     
-    for item in r:
-        if item.isdigit() and int(item) in [8, 16, 24, 32]:
-            thread_num = int(item)
-        if item.startswith("pp") or item.startswith("tg"):
-            test_type = item
-        if "±" in item or re.match(r"^\d+\.\d+$", item):
-            try:
-                ts_val = float(item.split("±")[0].strip())
-            except ValueError:
-                pass
-                
-    if thread_num is not None and ts_val is not None:
-        if test_type and test_type.startswith("tg"):
-            threads.append(f"{thread_num} Threads")
-            tg_vals.append(ts_val)
-        elif test_type and test_type.startswith("pp"):
-            pp_vals.append(ts_val)
+    rows = []
+    headers = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("|") and ("---" in line or "|---" in line):
+            continue
+        if line.startswith("|") and ("model" in line.lower() or "threads" in line.lower()):
+            headers = [p.strip().lower() for p in line.split("|")[1:-1]]
+            continue
+        if line.startswith("|"):
+            parts = [p.strip() for p in line.split("|")[1:-1]]
+            if len(parts) >= 4:
+                rows.append(parts)
 
-if tg_vals:
-    fig, ax1 = plt.subplots(figsize=(10, 5.5), dpi=300)
-    bars = ax1.bar(threads, tg_vals, color=ACCENT_CYAN, alpha=0.9, width=0.45)
-    ax1.set_ylabel("Measured Token Generation Speed (tok/s)", color=ACCENT_CYAN, fontsize=12, fontweight="bold")
-    ax1.set_title("DL380 E5-2640 v2: Empirical Generation Speed vs. Thread Count\n(Measured on Physical Hardware)", fontsize=13, fontweight="bold", pad=15)
-    ax1.grid(axis="y", linestyle="--", alpha=0.3)
-    
-    for b, val in zip(bars, tg_vals):
-        ax1.text(b.get_x() + b.get_width()/2, val + (max(tg_vals)*0.02), f"{val:.3f} t/s",
-                 ha="center", va="bottom", fontweight="bold", color=ACCENT_CYAN)
-                 
-    plt.tight_layout()
-    out_png = os.path.join(ASSETS_DIR, "empirical_thread_scaling.png")
-    out_svg = os.path.join(ASSETS_DIR, "empirical_thread_scaling.svg")
-    plt.savefig(out_png)
-    plt.savefig(out_svg)
-    plt.close()
-    print(f"[+] Saved empirical thread scaling chart to {out_png}")
+    if not rows:
+        continue
+
+    # Helper to find column index
+    def col_idx(names):
+        for n in names:
+            for idx, h in enumerate(headers):
+                if n in h:
+                    return idx
+        return -1
+
+    t_idx = col_idx(["threads", "th"])
+    test_idx = col_idx(["test"])
+    ts_idx = col_idx(["t/s", "speed", "tok/s"])
+
+    # Fallback column discovery if headers were inside or missing
+    if ts_idx == -1:
+        ts_idx = len(rows[0]) - 1
+
+    # Section 1: Thread Scaling
+    if "thread scaling" in sec_title.lower():
+        labels = []
+        tg_speeds = []
+        pp_speeds = []
+        for r in rows:
+            # find thread count and speed
+            th = None
+            speed = None
+            is_tg = False
+            is_pp = False
+            for part in r:
+                if part.isdigit() and int(part) in [8, 16, 24, 32]:
+                    th = f"{part} Threads"
+                if "tg" in part.lower():
+                    is_tg = True
+                if "pp" in part.lower():
+                    is_pp = True
+                if "±" in part or re.match(r"^\d+\.\d+$", part):
+                    try:
+                        speed = float(part.split("±")[0].strip())
+                    except ValueError:
+                        pass
+            if th and speed is not None:
+                if is_tg:
+                    labels.append(th)
+                    tg_speeds.append(speed)
+                elif is_pp:
+                    pp_speeds.append(speed)
+
+        if tg_speeds:
+            fig, ax = plt.subplots(figsize=(9, 5), dpi=300)
+            bars = ax.bar(labels, tg_speeds, color=ACCENT_CYAN, width=0.45, alpha=0.9)
+            ax.set_ylabel("Generation Speed (tok/s)", color=ACCENT_CYAN, fontweight="bold")
+            ax.set_title("DL380 E5-2640 v2: Thread Scaling vs. Generation Speed\n(Empirical Hardware Measurement)", fontweight="bold", pad=15)
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            for b, v in zip(bars, tg_speeds):
+                ax.text(b.get_x() + b.get_width()/2, v + (max(tg_speeds)*0.02), f"{v:.3f} t/s",
+                        ha="center", va="bottom", fontweight="bold", color=ACCENT_CYAN)
+            plt.tight_layout()
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_thread_scaling.png"))
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_thread_scaling.svg"))
+            plt.close()
+            print("[+] Generated empirical_thread_scaling chart.")
+
+    # Section 3: KV Cache Quantization
+    elif "kv cache" in sec_title.lower():
+        kv_labels = []
+        kv_speeds = []
+        for r in rows:
+            speed = None
+            kv_type = None
+            for part in r:
+                if any(k in part.lower() for k in ["q4_0", "q8_0", "f16"]):
+                    kv_type = part.upper()
+                if "±" in part or re.match(r"^\d+\.\d+$", part):
+                    try:
+                        speed = float(part.split("±")[0].strip())
+                    except ValueError:
+                        pass
+            if kv_type and speed is not None and "tg" in str(r).lower():
+                kv_labels.append(kv_type)
+                kv_speeds.append(speed)
+
+        if kv_speeds:
+            fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+            bars = ax.bar(kv_labels, kv_speeds, color=ACCENT_GREEN, width=0.45, alpha=0.9)
+            ax.set_ylabel("Generation Speed (tok/s)", color=ACCENT_GREEN, fontweight="bold")
+            ax.set_title("DL380 E5-2640 v2: KV Cache Quantization vs Generation Speed\n(Empirical Hardware Measurement)", fontweight="bold", pad=15)
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            for b, v in zip(bars, kv_speeds):
+                ax.text(b.get_x() + b.get_width()/2, v + (max(kv_speeds)*0.02), f"{v:.3f} t/s",
+                        ha="center", va="bottom", fontweight="bold", color=ACCENT_GREEN)
+            plt.tight_layout()
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_kv_cache.png"))
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_kv_cache.svg"))
+            plt.close()
+            print("[+] Generated empirical_kv_cache chart.")
+
+    # Section 4: Memory Residency Mode (mmap vs mlock)
+    elif "memory residency" in sec_title.lower() or "memory lock" in sec_title.lower():
+        mem_labels = []
+        mem_speeds = []
+        for r in rows:
+            speed = None
+            mem_type = None
+            for part in r:
+                if "mmap" in part.lower():
+                    mem_type = "mmap (Demand)"
+                elif "mlock" in part.lower():
+                    mem_type = "mlock (Pinned)"
+                if "±" in part or re.match(r"^\d+\.\d+$", part):
+                    try:
+                        speed = float(part.split("±")[0].strip())
+                    except ValueError:
+                        pass
+            if mem_type and speed is not None and "tg" in str(r).lower():
+                mem_labels.append(mem_type)
+                mem_speeds.append(speed)
+
+        if mem_speeds:
+            fig, ax = plt.subplots(figsize=(7, 5), dpi=300)
+            bars = ax.bar(mem_labels, mem_speeds, color=ACCENT_ORANGE, width=0.45, alpha=0.9)
+            ax.set_ylabel("Generation Speed (tok/s)", color=ACCENT_ORANGE, fontweight="bold")
+            ax.set_title("DL380 E5-2640 v2: Memory Lock vs On-Demand mmap\n(Empirical Hardware Measurement)", fontweight="bold", pad=15)
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            for b, v in zip(bars, mem_speeds):
+                ax.text(b.get_x() + b.get_width()/2, v + (max(mem_speeds)*0.02), f"{v:.3f} t/s",
+                        ha="center", va="bottom", fontweight="bold", color=ACCENT_ORANGE)
+            plt.tight_layout()
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_memory_residency.png"))
+            plt.savefig(os.path.join(ASSETS_DIR, "empirical_memory_residency.svg"))
+            plt.close()
+            print("[+] Generated empirical_memory_residency chart.")
+
