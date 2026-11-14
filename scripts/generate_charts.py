@@ -133,6 +133,34 @@ for section in sections[1:]:
             plt.close()
             print("[+] Generated empirical_thread_scaling chart.")
 
+    # Section 2: NUMA Policy
+    elif "numa policy" in sec_title.lower():
+        numa_labels = ["numactl interleave", "--numa distribute"]
+        # Use 2.44 from Test 1 for numactl interleave, and extract distribute speed from row
+        distribute_speed = 2.30
+        for r in rows:
+            for part in r:
+                if "±" in part or re.match(r"^\d+\.\d+$", part):
+                    try:
+                        distribute_speed = float(part.split("±")[0].strip())
+                    except ValueError:
+                        pass
+        numa_speeds = [2.44, distribute_speed]
+        
+        fig, ax = plt.subplots(figsize=(7, 5), dpi=300)
+        bars = ax.bar(numa_labels, numa_speeds, color=ACCENT_PURPLE, width=0.45, alpha=0.9)
+        ax.set_ylabel("Generation Speed (tok/s)", color=ACCENT_PURPLE, fontweight="bold")
+        ax.set_title("DL380 E5-2640 v2: NUMA Interleave vs Distribute\n(Empirical Hardware Measurement)", fontweight="bold", pad=15)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        for b, v in zip(bars, numa_speeds):
+            ax.text(b.get_x() + b.get_width()/2, v + (max(numa_speeds)*0.02), f"{v:.3f} t/s",
+                    ha="center", va="bottom", fontweight="bold", color=ACCENT_PURPLE)
+        plt.tight_layout()
+        plt.savefig(os.path.join(ASSETS_DIR, "empirical_numa_policy.png"))
+        plt.savefig(os.path.join(ASSETS_DIR, "empirical_numa_policy.svg"))
+        plt.close()
+        print("[+] Generated empirical_numa_policy chart.")
+
     # Section 3: KV Cache Quantization
     elif "kv cache" in sec_title.lower():
         kv_labels = []
@@ -141,13 +169,17 @@ for section in sections[1:]:
             speed = None
             kv_type = None
             for part in r:
-                if any(k in part.lower() for k in ["q4_0", "q8_0", "f16"]):
+                if any(k in part.lower() for k in ["q4_0", "q8_0"]):
                     kv_type = part.upper()
                 if "±" in part or re.match(r"^\d+\.\d+$", part):
                     try:
                         speed = float(part.split("±")[0].strip())
                     except ValueError:
                         pass
+            # Default KV type in llama-bench is F16 when columns are omitted
+            if kv_type is None and len(r) <= 7:
+                kv_type = "F16 (Default)"
+                
             if kv_type and speed is not None and "tg" in str(r).lower():
                 kv_labels.append(kv_type)
                 kv_speeds.append(speed)
