@@ -22,12 +22,13 @@ exec numactl --interleave=all "$SERVER_BIN" \
     --alias "deepseek-v4-flash-144gb" \
     --host "$HOST" \
     --port "$PORT" \
+    --reuse-port \
     --ctx-size "$CTX" \
     --threads 16 \
     --threads-batch 16 \
     --cache-type-k q4_0 \
     --cache-type-v q4_0 \
-    --load-mode mlock \
+    --load-mode mmap \
     --poll 100 \
     --cache-prompt \
     --n-gpu-layers 0
