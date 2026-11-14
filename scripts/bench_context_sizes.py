@@ -48,7 +48,7 @@ def get_token_count(endpoint: str, text: str) -> int:
     except Exception:
         return int(len(text.split()) / 0.75)
 
-def run_stream_query(endpoint: str, prompt: str, max_tokens: int = 16):
+def run_query(endpoint: str, prompt: str, max_tokens: int = 16):
     url = f"{endpoint.rstrip('/')}/chat/completions"
     payload = {
         "model": "deepseek-v4-flash-144gb",
@@ -57,71 +57,51 @@ def run_stream_query(endpoint: str, prompt: str, max_tokens: int = 16):
         ],
         "max_tokens": max_tokens,
         "temperature": 0.0,
-        "stream": True,
-        "stream_options": {"include_usage": True}
+        "stream": False
     }
     data = json.dumps(payload).encode('utf-8')
     headers = {"Content-Type": "application/json"}
     req = urllib.request.Request(url, data=data, headers=headers)
 
-    start_time = time.time()
-    first_token_time = None
-    chunks_count = 0
-    prompt_tokens = 0
-    completion_tokens = 0
+    start_wall = time.time()
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+    end_wall = time.time()
 
-    with urllib.request.urlopen(req, timeout=1200) as resp:
-        for line in resp:
-            line = line.decode('utf-8').strip()
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_str)
-                choices = chunk.get("choices", [])
-                if choices and "delta" in choices[0] and choices[0]["delta"].get("content"):
-                    if first_token_time is None:
-                        first_token_time = time.time()
-                    chunks_count += 1
-                usage = chunk.get("usage")
-                if usage:
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-            except Exception:
-                pass
+    timings = res.get("timings", {})
+    usage = res.get("usage", {})
 
-    end_time = time.time()
-    if first_token_time is None:
-        first_token_time = end_time
-
-    if prompt_tokens == 0:
-        prompt_tokens = get_token_count(endpoint, prompt)
-
-    ttft = first_token_time - start_time
-    gen_time = end_time - first_token_time
-    total_time = end_time - start_time
-    actual_gen_tokens = completion_tokens if completion_tokens > 0 else chunks_count
-
-    prefill_tok_s = prompt_tokens / ttft if ttft > 0 else 0
-    gen_tok_s = actual_gen_tokens / gen_time if gen_time > 0 and actual_gen_tokens > 0 else 0
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    
+    prompt_ms = timings.get("prompt_ms", (end_wall - start_wall) * 1000)
+    prompt_tok_s = timings.get("prompt_per_second", (prompt_tokens / (prompt_ms / 1000.0)) if prompt_ms > 0 else 0)
+    
+    gen_ms = timings.get("predicted_ms", 0)
+    gen_tok_s = timings.get("predicted_per_second", (completion_tokens / (gen_ms / 1000.0)) if gen_ms > 0 else 0)
+    
+    cached_tokens = timings.get("cache_n", 0)
 
     return {
         "prompt_tokens": prompt_tokens,
-        "completion_tokens": actual_gen_tokens,
-        "ttft_sec": ttft,
-        "prefill_tok_s": prefill_tok_s,
-        "gen_time_sec": gen_time,
+        "completion_tokens": completion_tokens,
+        "prompt_sec": prompt_ms / 1000.0,
+        "prefill_tok_s": prompt_tok_s,
+        "gen_sec": gen_ms / 1000.0,
         "gen_tok_s": gen_tok_s,
-        "total_time_sec": total_time
+        "cached_tokens": cached_tokens,
+        "wall_total_sec": end_wall - start_wall
     }
 
 def main():
     parser = argparse.ArgumentParser(description="Context scaling benchmark against llama-server")
     parser.add_argument("--endpoint", default="http://172.16.28.113:8084/v1", help="llama-server endpoint")
     parser.add_argument("--output", default="benchmarks/context_scaling_results.md", help="Output markdown results")
+    parser.add_argument("--sizes", default="64,256,512,1024,2048,4096", help="Comma-separated target context lengths")
+    parser.add_argument("--skip-cache-test", action="store_true", help="Skip the warm prompt cache run to save time on large contexts")
     args = parser.parse_args()
+
+    context_sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
 
     print(f"[*] Checking server health at {args.endpoint}...")
     health_url = args.endpoint.replace("/v1", "/health")
@@ -145,26 +125,30 @@ def main():
     print("| Target Ctx | Actual Prompt Tokens | TTFT (s) | Prefill (tok/s) | Gen Speed (tok/s) | Cached TTFT (s) | Cache Speedup |")
     print("| :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
-    for target_ctx in CONTEXT_SIZES:
+    for target_ctx in context_sizes:
         prompt = build_prompt(target_ctx)
+        print(f"[*] Testing target context size: {target_ctx} tokens...")
         
         # Cold run
-        cold = run_stream_query(args.endpoint, prompt, max_tokens=16)
+        cold = run_query(args.endpoint, prompt, max_tokens=16)
         
         # Warm run (Prompt Caching test)
-        warm = run_stream_query(args.endpoint, prompt, max_tokens=16)
-        
-        speedup = (cold["ttft_sec"] / warm["ttft_sec"]) if warm["ttft_sec"] > 0 else 1.0
+        if not args.skip_cache_test:
+            warm = run_query(args.endpoint, prompt, max_tokens=16)
+            speedup = (cold["prompt_sec"] / warm["prompt_sec"]) if warm["prompt_sec"] > 0 else 1.0
+        else:
+            warm = {"prompt_sec": 0.0, "cached_tokens": 0}
+            speedup = 1.0
 
-        print(f"| {target_ctx} | {cold['prompt_tokens']} | {cold['ttft_sec']:.2f}s | {cold['prefill_tok_s']:.2f} | {cold['gen_tok_s']:.2f} | {warm['ttft_sec']:.2f}s | {speedup:.1f}x |")
+        print(f"| {target_ctx} | {cold['prompt_tokens']} | {cold['prompt_sec']:.2f}s | {cold['prefill_tok_s']:.2f} | {cold['gen_tok_s']:.2f} | {warm['prompt_sec']:.2f}s | {speedup:.1f}x |")
         
         results.append({
             "target_ctx": target_ctx,
             "actual_prompt_tokens": cold["prompt_tokens"],
-            "cold_ttft": cold["ttft_sec"],
+            "cold_ttft": cold["prompt_sec"],
             "prefill_tok_s": cold["prefill_tok_s"],
             "gen_tok_s": cold["gen_tok_s"],
-            "warm_ttft": warm["ttft_sec"],
+            "warm_ttft": warm["prompt_sec"],
             "cache_speedup": speedup
         })
 
